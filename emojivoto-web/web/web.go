@@ -73,6 +73,11 @@ func (app *WebApp) leaderboardHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		emoji := findByShortcodeResponse.Emoji
+		if emoji == nil {
+			log.Printf("Warning: emoji with shortcode [%s] not found in leaderboard results", result.Shortcode)
+			continue
+		}
+
 		representation := make(map[string]string)
 		representation["votes"] = strconv.Itoa(int(result.Votes))
 		representation["unicode"] = emoji.Unicode
