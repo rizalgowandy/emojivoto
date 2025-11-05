@@ -1,16 +1,22 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
 
 	pb "github.com/buoyantio/emojivoto/emojivoto-web/gen/proto"
 	"github.com/buoyantio/emojivoto/emojivoto-web/web"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"google.golang.org/grpc"
-	"contrib.go.opencensus.io/exporter/ocagent"
-	"go.opencensus.io/plugin/ocgrpc"
-	"go.opencensus.io/trace"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -19,7 +25,7 @@ var (
 	votingsvcHost        = os.Getenv("VOTINGSVC_HOST")
 	indexBundle          = os.Getenv("INDEX_BUNDLE")
 	webpackDevServerHost = os.Getenv("WEBPACK_DEV_SERVER")
-	ocagentHost          = os.Getenv("OC_AGENT_HOST")
+	ocagentHost          = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 )
 
 func main() {
@@ -28,15 +34,34 @@ func main() {
 		log.Fatalf("WEB_PORT (currently [%s]) EMOJISVC_HOST (currently [%s]) and VOTINGSVC_HOST (currently [%s]) INDEX_BUNDLE (currently [%s]) environment variables must me set.", webPort, emojisvcHost, votingsvcHost, indexBundle)
 	}
 
-	oce, err := ocagent.NewExporter(
-		ocagent.WithInsecure(),
-		ocagent.WithReconnectionPeriod(5*time.Second),
-		ocagent.WithAddress(ocagentHost),
-		ocagent.WithServiceName("web"))
+	ctx := context.Background()
+	ote, err := otlptracegrpc.New(
+		ctx,
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithReconnectionPeriod(5*time.Second),
+		otlptracegrpc.WithEndpoint(ocagentHost),
+	)
 	if err != nil {
-		log.Fatalf("Failed to create ocagent-exporter: %v", err)
+		log.Fatalf("Failed to create oteltracegrpc-exporter: %v", err)
 	}
-	trace.RegisterExporter(oce)
+
+	r, err := resource.Merge(
+		resource.Default(),
+		resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName("web"),
+		),
+	)
+	propagator := propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	)
+	otel.SetTextMapPropagator(propagator)
+	traceProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithBatcher(ote),
+		sdktrace.WithResource(r))
+	otel.SetTracerProvider(traceProvider)
 
 	votingSvcConn := openGrpcClientConnection(votingsvcHost)
 	votingClient := pb.NewVotingServiceClient(votingSvcConn)
@@ -51,10 +76,10 @@ func main() {
 
 func openGrpcClientConnection(host string) *grpc.ClientConn {
 	log.Printf("Connecting to [%s]", host)
-	conn, err := grpc.Dial(
-		host,
-		grpc.WithInsecure(),
-		grpc.WithStatsHandler(new(ocgrpc.ClientHandler)))
+	conn, err := grpc.NewClient(host,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	)
 
 	if err != nil {
 		panic(err)
